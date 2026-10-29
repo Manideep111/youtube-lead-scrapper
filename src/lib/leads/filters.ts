@@ -67,6 +67,8 @@ export const REGIONS: Region[] = [
 ];
 
 export const NICHE_SUGGESTIONS = [
+  "Business",
+  "Finance",
   "Personal finance",
   "Fitness",
   "Tech reviews",
@@ -95,6 +97,8 @@ export interface ChannelLead {
   lastUploadAt: string | null;
   lastVideoTitle: string | null;
   lastVideoUrl: string | null;
+  // Share (0–1) of the channel's recent uploads that are longer than Shorts.
+  longFormShare: number;
   emails: string[];
   links: string[];
 }
