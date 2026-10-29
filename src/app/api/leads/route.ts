@@ -13,6 +13,13 @@ const API = "https://www.googleapis.com/youtube/v3";
 const MAX_SEARCH_PAGES = 3;
 const TARGET_LEADS = 20;
 
+// Shorts can run up to 3 minutes, so only longer videos count as long-form.
+const SHORTS_MAX_SECONDS = 180;
+// Judge each channel by its most recent uploads, and keep it only when most
+// of them are long-form.
+const RECENT_SAMPLE = 10;
+const MIN_LONG_FORM_SHARE = 0.6;
+
 const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
 const URL_RE = /https?:\/\/[^\s<>"')]+/gi;
 
@@ -52,6 +59,19 @@ interface PlaylistItem {
   contentDetails: { videoId: string; videoPublishedAt?: string };
 }
 
+interface VideoItem {
+  id: string;
+  contentDetails: { duration: string };
+}
+
+// Parses ISO 8601 durations like "PT1H2M3S" or "P1DT2H".
+function durationSeconds(iso: string) {
+  const m = /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/.exec(iso);
+  if (!m) return 0;
+  const [d, h, min, s] = m.slice(1).map((v) => Number(v ?? 0));
+  return ((d * 24 + h) * 60 + min) * 60 + s;
+}
+
 async function yt<T>(
   endpoint: string,
   params: Record<string, string | undefined>,
@@ -81,20 +101,52 @@ async function yt<T>(
   return body as T;
 }
 
-async function latestUpload(playlistId: string | undefined, key: string) {
+// Samples a channel's recent uploads: how many are long-form, and the newest
+// long-form one.
+async function recentUploads(playlistId: string | undefined, key: string) {
   if (!playlistId) return null;
   try {
-    const data = await yt<{ items?: PlaylistItem[] }>(
+    const list = await yt<{ items?: PlaylistItem[] }>(
       "playlistItems",
-      { part: "snippet,contentDetails", playlistId, maxResults: "1" },
+      {
+        part: "snippet,contentDetails",
+        playlistId,
+        maxResults: String(RECENT_SAMPLE),
+      },
       key,
     );
-    const item = data.items?.[0];
-    if (!item) return null;
+    const items = list.items ?? [];
+    if (items.length === 0) return null;
+
+    const videos = await yt<{ items?: VideoItem[] }>(
+      "videos",
+      {
+        part: "contentDetails",
+        id: items.map((i) => i.contentDetails.videoId).join(","),
+        maxResults: String(RECENT_SAMPLE),
+      },
+      key,
+    );
+    const durations = new Map(
+      (videos.items ?? []).map((v) => [v.id, durationSeconds(v.contentDetails.duration)]),
+    );
+
+    // Private and deleted videos come back without details; leave them out.
+    const sampled = items.filter((i) => durations.has(i.contentDetails.videoId));
+    if (sampled.length === 0) return null;
+    const longForm = sampled.filter(
+      (i) => durations.get(i.contentDetails.videoId)! > SHORTS_MAX_SECONDS,
+    );
+    const latest = longForm[0];
     return {
-      publishedAt: item.contentDetails.videoPublishedAt ?? null,
-      title: item.snippet.title,
-      videoId: item.contentDetails.videoId,
+      longFormShare: longForm.length / sampled.length,
+      latest: latest
+        ? {
+            publishedAt: latest.contentDetails.videoPublishedAt ?? null,
+            title: latest.snippet.title,
+            videoId: latest.contentDetails.videoId,
+          }
+        : null,
     };
   } catch {
     // Channels with no public uploads return 404 for their uploads playlist.
@@ -104,9 +156,10 @@ async function latestUpload(playlistId: string | undefined, key: string) {
 
 function toLead(
   channel: ChannelItem,
-  upload: Awaited<ReturnType<typeof latestUpload>>,
+  recent: NonNullable<Awaited<ReturnType<typeof recentUploads>>>,
 ): ChannelLead {
   const { snippet, statistics } = channel;
+  const upload = recent.latest;
   const handle = snippet.customUrl ?? null;
   const thumbs = snippet.thumbnails ?? {};
   return {
@@ -129,6 +182,7 @@ function toLead(
     lastVideoUrl: upload
       ? `https://www.youtube.com/watch?v=${upload.videoId}`
       : null,
+    longFormShare: recent.longFormShare,
     emails: [...new Set(snippet.description.match(EMAIL_RE) ?? [])],
     links: [...new Set(snippet.description.match(URL_RE) ?? [])].slice(0, 5),
   };
@@ -172,14 +226,15 @@ export async function GET(request: NextRequest) {
 
   try {
     for (let page = 0; page < MAX_SEARCH_PAGES; page++) {
-      // With an upload window, search recent *videos* in the niche: anyone who
-      // posted one is by definition active. Otherwise search channels directly.
+      // Search 4–20 minute videos in the niche, so the channels found make
+      // long-form content. With an upload window, only recent videos count.
       const search = await yt<{ items?: SearchItem[]; nextPageToken?: string }>(
         "search",
         {
           part: "snippet",
           q: niche,
-          type: cutoff ? "video" : "channel",
+          type: "video",
+          videoDuration: "medium",
           maxResults: "50",
           regionCode,
           publishedAfter: cutoff?.toISOString(),
@@ -220,17 +275,18 @@ export async function GET(request: NextRequest) {
 
         const uploads = await Promise.all(
           candidates.map((c) =>
-            latestUpload(c.contentDetails?.relatedPlaylists?.uploads, key),
+            recentUploads(c.contentDetails?.relatedPlaylists?.uploads, key),
           ),
         );
 
         candidates.forEach((c, i) => {
-          const upload = uploads[i];
+          const recent = uploads[i];
+          if (!recent || recent.longFormShare < MIN_LONG_FORM_SHARE) return;
           if (cutoff) {
-            const last = upload?.publishedAt ? new Date(upload.publishedAt) : null;
-            if (!last || last < cutoff) return;
+            const published = recent.latest?.publishedAt;
+            if (!published || new Date(published) < cutoff) return;
           }
-          leads.push(toLead(c, upload));
+          leads.push(toLead(c, recent));
         });
       }
 

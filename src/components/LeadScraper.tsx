@@ -82,7 +82,8 @@ function toCsv(leads: ChannelLead[]) {
     "Videos",
     "Country",
     "Last upload",
-    "Latest video",
+    "Latest long-form video",
+    "Long-form share",
     "Emails",
     "Links",
   ];
@@ -99,6 +100,7 @@ function toCsv(leads: ChannelLead[]) {
       l.country,
       l.lastUploadAt,
       l.lastVideoUrl,
+      `${Math.round(l.longFormShare * 100)}%`,
       l.emails.join(" "),
       l.links.join(" "),
     ]
@@ -110,7 +112,7 @@ function toCsv(leads: ChannelLead[]) {
 
 export function LeadScraper() {
   const [niche, setNiche] = useState("");
-  const [subs, setSubs] = useState("any");
+  const [subs, setSubs] = useState("50k-100k");
   const [upload, setUpload] = useState("1w");
   const [region, setRegion] = useState("any");
 
@@ -289,7 +291,7 @@ export function LeadScraper() {
 
           <div className="mt-7 flex flex-col-reverse items-stretch gap-3 border-t border-lilac-100 pt-5 sm:flex-row sm:items-center sm:justify-between">
             <p className="text-xs text-ink-soft">
-              Each search uses up to ~450 units of your 10,000/day YouTube API
+              Each search uses up to ~600 units of your 10,000/day YouTube API
               quota.
             </p>
             <button
@@ -524,6 +526,9 @@ function LeadCard({ lead }: { lead: ChannelLead }) {
         </Stat>
         <Stat className="bg-lilac-50 text-ink-soft" icon={<Film className="size-3.5" />}>
           {compact.format(lead.videos)} videos
+        </Stat>
+        <Stat className="bg-lilac-50 text-ink-soft" icon={<CirclePlay className="size-3.5" />}>
+          {Math.round(lead.longFormShare * 100)}% long-form
         </Stat>
         <Stat className="bg-lilac-50 text-ink-soft" icon={<Eye className="size-3.5" />}>
           {compact.format(lead.views)} views
